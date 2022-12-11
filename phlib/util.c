@@ -3443,21 +3443,27 @@ PPH_STRING PhGetTemporaryDirectoryRandomAlphaFileName(
     return randomAlphaFileName;
 }
 
-PPH_STRING PhGetApplicationDataDirectory(
+PPH_STRING PhGetRoamingAppDataDirectory(
     _In_ PPH_STRINGREF FileName
     )
 {
-    static PH_STRINGREF directoryPath = PH_STRINGREF_INIT(L"%APPDATA%\\SystemInformer\\");
-    PPH_STRING applicationDataDirectory = NULL;
-    PPH_STRING applicationDirectory;
+    PPH_STRING roamingAppDataFileName = NULL;
+    PPH_STRING roamingAppDataDirectory;
 
-    if (applicationDirectory = PhExpandEnvironmentStrings(&directoryPath))
+#if !defined(PH_BUILD_MSIX)
+    static PH_STRINGREF directoryPath = PH_STRINGREF_INIT(L"%APPDATA%\\SystemInformer\\");
+    roamingAppDataDirectory = PhExpandEnvironmentStrings(&directoryPath);
+#else
+    roamingAppDataDirectory = PhGetKnownFolderPath(&FOLDERID_RoamingAppData, L"\\SystemInformer\\");
+#endif
+
+    if (roamingAppDataDirectory)
     {
-        applicationDataDirectory = PhConcatStringRef2(&applicationDirectory->sr, FileName);
-        PhReferenceObject(applicationDirectory);
+        roamingAppDataFileName = PhConcatStringRef2(&roamingAppDataDirectory->sr, FileName);
+        PhReferenceObject(roamingAppDataDirectory);
     }
 
-    return applicationDataDirectory;
+    return roamingAppDataFileName;
 }
 
 PPH_STRING PhGetApplicationDataFileName(
@@ -3465,12 +3471,9 @@ PPH_STRING PhGetApplicationDataFileName(
     _In_ BOOLEAN NativeFileName
     )
 {
-    static PH_STRINGREF directoryPath = PH_STRINGREF_INIT(L"\\??\\%APPDATA%\\SystemInformer\\");
-    static PH_STRINGREF directoryPathWin32 = PH_STRINGREF_INIT(L"%APPDATA%\\SystemInformer\\");
     PPH_STRING applicationDataFileName = NULL;
-    PPH_STRING applicationDirectory;
 
-    // Check current directory. (dmex)
+    // Check the current directory. (dmex)
 
     if (applicationDataFileName = PhGetApplicationDirectoryFileName(FileName, NativeFileName))
     {
@@ -3488,20 +3491,17 @@ PPH_STRING PhGetApplicationDataFileName(
         PhClearReference(&applicationDataFileName);
     }
 
-    // Check appdata directory. (dmex)
+    // Check the appdata directory. (dmex)
+
     if (NativeFileName)
     {
-        applicationDirectory = PhExpandEnvironmentStrings(&directoryPath);
+        static PH_STRINGREF path = PH_STRINGREF_INIT(L"\\??\\");
+        applicationDataFileName = PhGetRoamingAppDataDirectory(FileName);
+        PhMoveReference(&applicationDataFileName, PhConcatStringRef2(&path, &applicationDataFileName->sr));
     }
     else
     {
-        applicationDirectory = PhExpandEnvironmentStrings(&directoryPathWin32);
-    }
-
-    if (applicationDirectory)
-    {
-        applicationDataFileName = PhConcatStringRef2(&applicationDirectory->sr, FileName);
-        PhReferenceObject(applicationDirectory);
+        applicationDataFileName = PhGetRoamingAppDataDirectory(FileName);
     }
 
     return applicationDataFileName;
@@ -3513,46 +3513,109 @@ PPH_STRING PhGetApplicationDataFileName(
  * \param Folder A CSIDL value representing the known location.
  * \param AppendPath A string to append to the folder path.
  */
-PPH_STRING PhGetKnownLocation(
-    _In_ ULONG Folder,
+//PPH_STRING PhGetKnownLocation(
+//    _In_ ULONG Folder,
+//    _In_opt_ PWSTR AppendPath
+//    )
+//{
+//    PPH_STRING path;
+//    SIZE_T appendPathLength;
+//
+//    if (!SHGetFolderPathW_Import())
+//        return NULL;
+//
+//    if (AppendPath)
+//        appendPathLength = PhCountStringZ(AppendPath) * sizeof(WCHAR);
+//    else
+//        appendPathLength = 0;
+//
+//    path = PhCreateStringEx(NULL, MAX_PATH * sizeof(WCHAR) + appendPathLength);
+//
+//    if (SUCCEEDED(SHGetFolderPathW_Import()(
+//        NULL,
+//        Folder,
+//        NULL,
+//        SHGFP_TYPE_CURRENT,
+//        path->Buffer
+//        )))
+//    {
+//        PhTrimToNullTerminatorString(path);
+//
+//        if (AppendPath)
+//        {
+//            memcpy(&path->Buffer[path->Length / sizeof(WCHAR)], AppendPath, appendPathLength + sizeof(UNICODE_NULL)); // +2 for null terminator
+//            path->Length += appendPathLength;
+//        }
+//
+//        return path;
+//    }
+//
+//    PhDereferenceObject(path);
+//
+//    return NULL;
+//}
+
+PPH_STRING PhGetKnownFolderPath(
+    _In_ REFKNOWNFOLDERID Folder,
+    _In_opt_ PWSTR AppendPath
+    )
+{
+    return PhGetKnownFolderPathEx(Folder, 0, NULL, AppendPath);
+}
+
+static const PH_FLAG_MAPPING PhpKnownFolderFlagMappings[] =
+{
+    { PH_KF_FLAG_FORCE_APP_DATA_REDIRECTION, KF_FLAG_FORCE_APP_DATA_REDIRECTION },
+};
+
+PPH_STRING PhGetKnownFolderPathEx(
+    _In_ REFKNOWNFOLDERID Folder,
+    _In_ ULONG Flags,
+    _In_opt_ HANDLE TokenHandle,
     _In_opt_ PWSTR AppendPath
     )
 {
     PPH_STRING path;
-    SIZE_T appendPathLength;
+    ULONG flags;
+    PWSTR knownFolderBuffer;
+    SIZE_T knownFolderLength;
+    SIZE_T knownAppendLength;
 
-    if (!SHGetFolderPathW_Import())
-        return NULL;
+    flags = 0;
+    PhMapFlags1(&flags, Flags, PhpKnownFolderFlagMappings, ARRAYSIZE(PhpKnownFolderFlagMappings));
 
-    if (AppendPath)
-        appendPathLength = PhCountStringZ(AppendPath) * sizeof(WCHAR);
-    else
-        appendPathLength = 0;
-
-    path = PhCreateStringEx(NULL, MAX_PATH * sizeof(WCHAR) + appendPathLength);
-
-    if (SUCCEEDED(SHGetFolderPathW_Import()(
-        NULL,
+    if (FAILED(SHGetKnownFolderPath(
         Folder,
-        NULL,
-        SHGFP_TYPE_CURRENT,
-        path->Buffer
+        flags | KF_FLAG_DONT_VERIFY,
+        TokenHandle,
+        &knownFolderBuffer
         )))
     {
-        PhTrimToNullTerminatorString(path);
-
-        if (AppendPath)
-        {
-            memcpy(&path->Buffer[path->Length / sizeof(WCHAR)], AppendPath, appendPathLength + sizeof(UNICODE_NULL)); // +2 for null terminator
-            path->Length += appendPathLength;
-        }
-
-        return path;
+        return NULL;
     }
 
-    PhDereferenceObject(path);
+    knownFolderLength = PhCountStringZ(knownFolderBuffer) * sizeof(WCHAR);
+    knownAppendLength = AppendPath ? PhCountStringZ(AppendPath) * sizeof(WCHAR) : 0;
 
-    return NULL;
+    path = PhCreateStringEx(NULL, knownFolderLength + knownAppendLength);
+    memcpy(
+        path->Buffer,
+        knownFolderBuffer,
+        knownFolderLength
+        );
+
+    if (AppendPath)
+    {
+        memcpy(
+            PTR_ADD_OFFSET(path->Buffer, knownFolderLength),
+            AppendPath,
+            knownAppendLength
+            );
+    }
+
+    CoTaskMemFree(knownFolderBuffer);
+
+    return path;
 }
 
 /**
@@ -6502,7 +6565,6 @@ PPH_STRING PhCreateCacheFile(
     _In_ PPH_STRING FileName
     )
 {
-    static PH_STRINGREF settingsPath = PH_STRINGREF_INIT(L"%APPDATA%\\SystemInformer\\");
     static PH_STRINGREF settingsSuffix = PH_STRINGREF_INIT(L".settings.xml");
     static PH_STRINGREF settingsDir = PH_STRINGREF_INIT(L"\\cache");
     PPH_STRING fileName;
@@ -6549,8 +6611,7 @@ PPH_STRING PhCreateCacheFile(
         }
         else
         {
-            cacheDirectory = PhConcatStringRef2(&settingsPath, &settingsDir);
-            PhMoveReference(&cacheDirectory, PhExpandEnvironmentStrings(&cacheDirectory->sr));
+            cacheDirectory = PhGetRoamingAppDataDirectory(&settingsDir);
         }
 
         PhDereferenceObject(applicationFileName);
@@ -6558,8 +6619,7 @@ PPH_STRING PhCreateCacheFile(
     }
     else
     {
-        cacheDirectory = PhConcatStringRef2(&settingsPath, &settingsDir);
-        PhMoveReference(&cacheDirectory, PhExpandEnvironmentStrings(&cacheDirectory->sr));
+        cacheDirectory = PhGetRoamingAppDataDirectory(&settingsDir);
 
         if (PhIsNullOrEmptyString(cacheDirectory))
         {
@@ -6601,7 +6661,6 @@ VOID PhClearCacheDirectory(
     VOID
     )
 {
-    static PH_STRINGREF settingsPath = PH_STRINGREF_INIT(L"%APPDATA%\\SystemInformer\\");
     static PH_STRINGREF settingsSuffix = PH_STRINGREF_INIT(L".settings.xml");
     static PH_STRINGREF settingsDir = PH_STRINGREF_INIT(L"\\cache");
     PPH_STRING fileName;
@@ -6647,8 +6706,7 @@ VOID PhClearCacheDirectory(
         }
         else
         {
-            cacheDirectory = PhConcatStringRef2(&settingsPath, &settingsDir);
-            PhMoveReference(&cacheDirectory, PhExpandEnvironmentStrings(&cacheDirectory->sr));
+            cacheDirectory = PhGetRoamingAppDataDirectory(&settingsDir);
         }
 
         PhDereferenceObject(applicationFileName);
@@ -6656,8 +6714,7 @@ VOID PhClearCacheDirectory(
     }
     else
     {
-        cacheDirectory = PhConcatStringRef2(&settingsPath, &settingsDir);
-        PhMoveReference(&cacheDirectory, PhExpandEnvironmentStrings(&cacheDirectory->sr));
+        cacheDirectory = PhGetRoamingAppDataDirectory(&settingsDir);
     }
 
     if (cacheDirectory)
@@ -6763,54 +6820,54 @@ HANDLE PhGetNamespaceHandle(
 }
 
 // rev from LdrAccessResource (dmex)
-NTSTATUS PhAccessResource(
-    _In_ PVOID DllBase,
-    _In_ PIMAGE_RESOURCE_DATA_ENTRY ResourceDataEntry,
-    _Out_opt_ PVOID *ResourceBuffer,
-    _Out_opt_ ULONG *ResourceLength
-    )
-{
-    PVOID baseAddress;
-
-    if (LDR_IS_DATAFILE(DllBase))
-        baseAddress = LDR_DATAFILE_TO_MAPPEDVIEW(DllBase);
-    else if (LDR_IS_IMAGEMAPPING(DllBase))
-        baseAddress = LDR_IMAGEMAPPING_TO_MAPPEDVIEW(DllBase);
-    else
-        baseAddress = DllBase;
-
-    if (ResourceLength)
-    {
-        *ResourceLength = ResourceDataEntry->Size;
-    }
-
-    if (ResourceBuffer)
-    {
-        if (LDR_IS_DATAFILE(DllBase))
-        {
-            NTSTATUS status;
-
-            status = PhLoaderEntryImageRvaToVa(
-                baseAddress,
-                ResourceDataEntry->OffsetToData,
-                ResourceBuffer
-                );
-
-            return status;
-        }
-        else
-        {
-            *ResourceBuffer = PTR_ADD_OFFSET(
-                baseAddress,
-                ResourceDataEntry->OffsetToData
-                );
-
-            return STATUS_SUCCESS;
-        }
-    }
-
-    return STATUS_SUCCESS;
-}
+//NTSTATUS PhAccessResource(
+//    _In_ PVOID DllBase,
+//    _In_ PIMAGE_RESOURCE_DATA_ENTRY ResourceDataEntry,
+//    _Out_opt_ PVOID *ResourceBuffer,
+//    _Out_opt_ ULONG *ResourceLength
+//    )
+//{
+//    PVOID baseAddress;
+//
+//    if (LDR_IS_DATAFILE(DllBase))
+//        baseAddress = LDR_DATAFILE_TO_MAPPEDVIEW(DllBase);
+//    else if (LDR_IS_IMAGEMAPPING(DllBase))
+//        baseAddress = LDR_IMAGEMAPPING_TO_MAPPEDVIEW(DllBase);
+//    else
+//        baseAddress = DllBase;
+//
+//    if (ResourceLength)
+//    {
+//        *ResourceLength = ResourceDataEntry->Size;
+//    }
+//
+//    if (ResourceBuffer)
+//    {
+//        if (LDR_IS_DATAFILE(DllBase))
+//        {
+//            NTSTATUS status;
+//
+//            status = PhLoaderEntryImageRvaToVa(
+//                baseAddress,
+//                ResourceDataEntry->OffsetToData,
+//                ResourceBuffer
+//                );
+//
+//            return status;
+//        }
+//        else
+//        {
+//            *ResourceBuffer = PTR_ADD_OFFSET(
+//                baseAddress,
+//                ResourceDataEntry->OffsetToData
+//                );
+//
+//            return STATUS_SUCCESS;
+//        }
+//    }
+//
+//    return STATUS_SUCCESS;
+//}
 
 _Success_(return)
 BOOLEAN PhLoadResource(
@@ -8217,7 +8274,7 @@ NTSTATUS PhLoaderEntryLoadDll(
 
     status = PhCreateFileWin32(
         &fileHandle,
-        FileName->Buffer,
+        PhGetStringRefZ(FileName),
         FILE_READ_DATA | FILE_EXECUTE | SYNCHRONIZE,
         FILE_ATTRIBUTE_NORMAL,
         FILE_SHARE_READ,
@@ -9412,6 +9469,7 @@ VOID PhFreeProcessSnapshot(
 
 NTSTATUS PhCreateProcessRedirection(
     _In_ PPH_STRING CommandLine,
+    _In_opt_ PPH_STRINGREF CommandInput,
     _Out_opt_ PPH_STRING *CommandOutput
     )
 {
@@ -9453,6 +9511,7 @@ NTSTATUS PhCreateProcessRedirection(
     startupInfo.StartupInfo.hStdOutput = outputWriteHandle;
     startupInfo.StartupInfo.hStdError = outputWriteHandle;
 
+#if !defined(PH_BUILD_MSIX)
     status = PhInitializeProcThreadAttributeList(&startupInfo.lpAttributeList, 1);
 
     if (!NT_SUCCESS(status))
@@ -9467,6 +9526,32 @@ NTSTATUS PhCreateProcessRedirection(
 
     if (!NT_SUCCESS(status))
         goto CleanupExit;
+#else
+    status = PhInitializeProcThreadAttributeList(&startupInfo.lpAttributeList, 2);
+
+    if (!NT_SUCCESS(status))
+        goto CleanupExit;
+
+    status = PhUpdateProcThreadAttribute(
+        startupInfo.lpAttributeList,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        &(HANDLE[2]){ inputReadHandle, outputWriteHandle },
+        sizeof(HANDLE[2])
+        );
+
+    if (!NT_SUCCESS(status))
+        goto CleanupExit;
+
+    status = PhUpdateProcThreadAttribute(
+        startupInfo.lpAttributeList,
+        PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY,
+        &(ULONG){ PROCESS_CREATION_DESKTOP_APP_BREAKAWAY_OVERRIDE },
+        sizeof(ULONG)
+        );
+
+    if (!NT_SUCCESS(status))
+        goto CleanupExit;
+#endif
 
     status = PhCreateProcessWin32Ex(
         NULL,
@@ -9489,6 +9574,23 @@ NTSTATUS PhCreateProcessRedirection(
 
     if (!NT_SUCCESS(status))
         goto CleanupExit;
+
+    if (CommandInput)
+    {
+        IO_STATUS_BLOCK isb;
+
+        NtWriteFile(
+            inputWriteHandle,
+            NULL,
+            NULL,
+            NULL,
+            &isb,
+            CommandInput->Buffer, 
+            (ULONG)CommandInput->Length, 
+            NULL, 
+            NULL
+            );
+    }
 
     output = PhGetFileText(outputReadHandle, TRUE);
 
@@ -9539,8 +9641,8 @@ NTSTATUS PhInitializeProcThreadAttributeList(
     attributeListLength = FIELD_OFFSET(PROC_THREAD_ATTRIBUTE_LIST, Attributes[AttributeCount]);
     attributeList = PhAllocateZero(attributeListLength);
     attributeList->AttributeCount = AttributeCount;
-
     *AttributeList = attributeList;
+
     return STATUS_SUCCESS;
 }
 
